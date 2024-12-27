@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Secure Chat</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f0f2f5;
+        }
+
+        .chat-container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+            height: 90vh;
+        }
+
+        .chat-header {
+            padding: 15px;
+            background: #075e54;
+            color: white;
+            border-radius: 10px 10px 0 0;
+        }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        .message {
+            margin-bottom: 10px;
+            max-width: 70%;
+            padding: 10px 15px;
+            border-radius: 15px;
+            position: relative;
+        }
+
+        .message.sent {
+            background: #dcf8c6;
+            margin-left: auto;
+            border-radius: 15px 15px 0 15px;
+        }
+
+        .message.received {
+            background: #fff;
+            margin-right: auto;
+            border-radius: 15px 15px 15px 0;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        }
+
+        .message.system {
+            background: #e9ecef;
+            margin: 10px auto;
+            text-align: center;
+            font-style: italic;
+            font-size: 0.9em;
+        }
+
+        .timestamp {
+            font-size: 0.7em;
+            color: #666;
+            margin-top: 5px;
+        }
+
+        .input-area {
+            padding: 15px;
+            background: #f8f9fa;
+            border-top: 1px solid #dee2e6;
+            border-radius: 0 0 10px 10px;
+            display: flex;
+            gap: 10px;
+        }
+
+        #messageInput {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #dee2e6;
+            border-radius: 20px;
+            outline: none;
+        }
+
+        button {
+            background: #075e54;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background: #128c7e;
+        }
+
+        .status-indicator {
+            font-size: 0.8em;
+            color: #666;
+            text-align: center;
+            padding: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <h2>Secure Chat</h2>
+            <div class="status-indicator" id="connectionStatus">Connecting...</div>
+        </div>
+        <div class="chat-messages" id="chatMessages"></div>
+        <div class="input-area">
+            <input type="text" id="messageInput" placeholder="Type a message..." autocomplete="off">
+            <button onclick="sendMessage()">Send</button>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+    <script>
+        let encryptionKey;
+        const ws = new WebSocket('ws://localhost:8080');
+
+        // Encryption functions
+        async function encryptMessage(message) {
+            const iv = crypto.getRandomValues(new Uint8Array(12));
+            const encodedMessage = new TextEncoder().encode(message);
+            
+            const key = await crypto.subtle.importKey(
+                'raw',
+                new Uint8Array(atob(encryptionKey).split('').map(c => c.charCodeAt(0))),
+                { name: 'AES-GCM' },
+                false,
+                ['encrypt']
+            );
+
+            const encryptedContent = await crypto.subtle.encrypt(
+                {
+                    name: 'AES-GCM',
+                    iv: iv
+                },
+                key,
+                encodedMessage
+            );
+
+            return {
+                content: Array.from(new Uint8Array(encryptedContent)),
+                iv: Array.from(iv)
+            };
+        }
+
+        async function decryptMessage(encryptedData) {
+            const key = await crypto.subtle.importKey(
+                'raw',
+                new Uint8Array(atob(encryptionKey).split('').map(c => c.charCodeAt(0))),
+                { name: 'AES-GCM' },
+                false,
+                ['decrypt']
+            );
+
+            const decrypted = await crypto.subtle.decrypt(
+                {
+                    name: 'AES-GCM',
+                    iv: new Uint8Array(encryptedData.iv)
+                },
+                key,
+                new Uint8Array(encryptedData.content)
+            );
+
+            return new TextDecoder().decode(decrypted);
+        }
+
+        // WebSocket handlers
+        ws.onopen = () => {
+            displayMessage('system', 'Connected to chat');
+            document.getElementById('connectionStatus').textContent = 'Connected';
+            document.getElementById('connectionStatus').style.color = '#4caf50';
+        };
+
+        ws.onmessage = async (event) => {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === 'key') {
+                encryptionKey = data.key;
+                console.log('Received encryption key');
+            } else if (data.type === 'message') {
+                try {
+                    const decryptedMessage = await decryptMessage({
+                        content: data.content,
+                        iv: data.iv
+                    });
+                    displayMessage(data.senderId, decryptedMessage);
+                } catch (error) {
+                    console.error('Decryption error:', error);
+                    displayMessage('system', 'Failed to decrypt message');
+                }
+            } else if (data.type === 'delete') {
+                // Remove message from DOM
+                const messageElement = document.getElementById(`msg-${data.messageId}`);
+                if (messageElement) {
+                    messageElement.remove();
+                }
+            } else if (data.type === 'message') {
+                // Add message ID to the message element
+                const messageDiv = document.createElement('div');
+                messageDiv.id = `msg-${data.messageId}`;
+                // ... rest of your message handling code
+            }
+        };
+
+        ws.onclose = () => {
+            displayMessage('system', 'Disconnected from chat');
+            document.getElementById('connectionStatus').textContent = 'Disconnected';
+            document.getElementById('connectionStatus').style.color = '#f44336';
+        };
+        ws.onerror = () => displayMessage('system', 'Connection error occurred');
+
+        // Send message function
+        async function sendMessage() {
+            const messageInput = document.getElementById('messageInput');
+            const message = messageInput.value.trim();
+            if (!message) return;
+
+            if (!encryptionKey) {
+                displayMessage('system', 'Waiting for encryption key...');
+                return;
+            }
+            
+            try {
+                const encrypted = await encryptMessage(message);
+                ws.send(JSON.stringify(encrypted));
+                displayMessage('sent', message);
+                messageInput.value = '';
+            } catch (error) {
+                console.error('Encryption error:', error);
+                displayMessage('system', 'Failed to encrypt message');
+            }
+        }
+
+        function displayMessage(sender, message) {
+            const messagesDiv = document.getElementById('chatMessages');
+            const messageDiv = document.createElement('div');
+            const timestamp = new Date().toLocaleTimeString();
+            
+            messageDiv.className = `message ${sender === 'sent' ? 'sent' : sender === 'system' ? 'system' : 'received'}`;
+            
+            if (sender === 'system') {
+                messageDiv.textContent = message;
+            } else {
+                messageDiv.innerHTML = `
+                    <div class="message-content">${message}</div>
+                    <div class="timestamp">${timestamp}</div>
+                `;
+            }
+            
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        document.getElementById('messageInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html>
